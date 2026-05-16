@@ -1,6 +1,8 @@
 /* src/hyprland.c - Hyprland IPC and Data Management */
 #define _POSIX_C_SOURCE 200809L
 
+#include <stdbool.h>
+
 #include "hyprland.h"
 #include "config.h"
 #include <errno.h>
@@ -16,11 +18,78 @@
 #define BUFFER_SIZE 65536
 #define INITIAL_CAPACITY 32
 
+/* Cached dispatch syntax flag: true = Lua (v0.55+ with hyprland.lua),
+ * false = legacy hyprlang (pre-0.55 or 0.55 with hyprland.conf). */
+static bool use_lua_dispatch = false;
+
 static char *get_socket_path(void);
+static char *hyprland_request(const char *cmd);
+
+/*
+ * Probe Hyprland IPC to determine the correct dispatch syntax.
+ *
+ * Strategy:
+ *   1. Request "version" — parse major.minor to check for >= 0.55.
+ *   2. If >= 0.55, request "systeminfo" and look for "configProvider: lua".
+ *      If the user is on 0.55 but still using hyprland.conf, the provider
+ *      will be "hyprlang" and we must keep using legacy dispatch syntax.
+ *
+ * This runs once during backend init; the result is cached in
+ * `use_lua_dispatch`.
+ */
+static void detect_dispatch_syntax(void) {
+  use_lua_dispatch = false;
+
+  /* Step 1: Check Hyprland version */
+  char *ver_resp = hyprland_request("version");
+  if (!ver_resp) {
+    LOG("Failed to query Hyprland version, defaulting to legacy dispatch");
+    return;
+  }
+
+  int major = -1, minor = -1;
+  /* The version response contains a line like "Version: v0.XX.Y" or similar.
+   * We scan for the first occurrence of "v<digits>.<digits>". */
+  const char *v = strstr(ver_resp, "v");
+  while (v) {
+    if (sscanf(v, "v%d.%d", &major, &minor) == 2)
+      break;
+    v = strstr(v + 1, "v");
+  }
+
+  free(ver_resp);
+
+  if (major < 0 || minor < 0) {
+    LOG("Could not parse Hyprland version, defaulting to legacy dispatch");
+    return;
+  }
+
+  LOG("Detected Hyprland version: v%d.%d", major, minor);
+
+  /* Pre-0.55 — always legacy */
+  if (major == 0 && minor < 55) {
+    LOG("Version < 0.55, using legacy dispatch syntax");
+    return;
+  }
+
+  /* Step 2: Version >= 0.55 — check config provider */
+  char *info_resp = hyprland_request("systeminfo");
+  if (!info_resp) {
+    LOG("Failed to query systeminfo, defaulting to legacy dispatch");
+    return;
+  }
+
+  if (strstr(info_resp, "configProvider: lua")) {
+    use_lua_dispatch = true;
+    LOG("Config provider is Lua, using Lua dispatch syntax");
+  } else {
+    LOG("Config provider is not Lua (likely hyprlang), using legacy dispatch");
+  }
+
+  free(info_resp);
+}
 
 int hyprland_backend_init(void) {
-  /* Hyprland backend doesn't need special initialization */
-  /* Just check if we can connect */
   char *socket_path = get_socket_path();
   if (!socket_path) {
     LOG("HYPRLAND_INSTANCE_SIGNATURE or XDG_RUNTIME_DIR not set");
@@ -35,6 +104,10 @@ int hyprland_backend_init(void) {
   }
 
   free(socket_path);
+
+  /* Probe IPC once to determine dispatch syntax */
+  detect_dispatch_syntax();
+
   return 0;
 }
 
@@ -326,8 +399,12 @@ void switch_to_window(const char *address) {
   if (!address)
     return;
   char cmd[256];
-  snprintf(cmd, sizeof(cmd),
-           "dispatch hl.dsp.focus({ window = \"address:%s\" })", address);
+  if (use_lua_dispatch) {
+    snprintf(cmd, sizeof(cmd),
+             "dispatch hl.dsp.focus({ window = \"address:%s\" })", address);
+  } else {
+    snprintf(cmd, sizeof(cmd), "dispatch focuswindow address:%s", address);
+  }
   char *resp = hyprland_request(cmd);
   if (resp)
     free(resp);
