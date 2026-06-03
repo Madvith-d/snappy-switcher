@@ -81,7 +81,7 @@ makepkg -si
 sudo dnf install wayland-devel cairo-devel pango-devel json-c-devel libxkbcommon-devel glib2-devel librsvg2-devel
 ```
 
-> An RPM `.spec` file is included for building via `rpmbuild` or Copr.
+> A Copr way to install things will be included soon (Community maintained pkgs will be appreciated)
 
 </details>
 
